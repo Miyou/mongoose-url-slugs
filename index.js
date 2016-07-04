@@ -130,19 +130,33 @@ module.exports = function(slugFields, options) {
 	var saveQueue = {
 		tasks: {},
 		push: function(doc, callback) {
-			var slug = doc.slugify();
-			if (!saveQueue.tasks[slug]) {
-				saveQueue.tasks[slug] = {
-					processing: false,
-					items: []
-				};
-			}
-			saveQueue.tasks[slug].items.push({
-				doc: doc,
-				cb: callback
-			});
+			return new Promise(function(resolve, reject) {
+				var slug = doc.slugify();
+				if (slug instanceof Error) {
+					callback && callback(slug);
+					return reject(slug);
+				}
 
-			saveQueue.process(slug);
+				if (!saveQueue.tasks[slug]) {
+					saveQueue.tasks[slug] = {
+						processing: false,
+						items: []
+					};
+				}
+				saveQueue.tasks[slug].items.push({
+					doc: doc,
+					cb: function(error, returnedDoc) {
+						if (error) {
+							callback && callback(error);
+							return reject(error);
+						}
+						callback && callback(null, returnedDoc);
+						resolve(returnedDoc);
+					}
+				});
+
+				saveQueue.process(slug);
+			});
 		},
 		process: function(slug) {
 			if (!saveQueue.tasks[slug].processing) {
@@ -163,7 +177,9 @@ module.exports = function(slugFields, options) {
 					}
 					if (e) return completeProcess(e)
 
-					item.doc.set(options.field, finalSlug);
+					if (slug) { //Don't set the slug if index_sparse is enabled and the field was omitted
+						item.doc.set(options.field, finalSlug);
+					}
 					item.doc.markModified(options.field, finalSlug); // sometimes required :)
 					
 					item.doc.save(completeProcess);
@@ -214,23 +230,10 @@ module.exports = function(slugFields, options) {
 			});
 		};
 
-		schema.methods.saveUnique = function(doc, callback) {
-			return new Promise(function(resolve, reject) {
-				saveQueue.push(doc, function(error, returnedDoc) {
-					if (error) {
-						callback && callback(error);
-						reject(error);
-					}
-					callback && callback(null, returnedDoc);
-					resolve(returnedDoc);
-				});
-			});
-		}
-
 		schema.methods.slugify = function() {
 			var doc = this;
 			var currentSlug = doc.get(options.field, String);
-			if (!doc.isNew && !options.update && currentSlug) return null;
+			if (!doc.isNew && !options.update && currentSlug) return new Error('You must enable the update option to use the unique update methods!');
 
 			var slugFieldsModified = doc.isNew;
 			var toSlugify = '';
@@ -251,9 +254,14 @@ module.exports = function(slugFields, options) {
 
 			var newSlug = options.generator(removeDiacritics(toSlugify), options.separator);
 
-			if (!newSlug.length && options.index_sparse) {
-				doc.set(options.field, undefined);
-				return newSlug;
+			if (!newSlug.length) {
+				if (options.index_sparse) {
+					doc.set(options.field, undefined);
+					return newSlug;
+				}
+				else {
+					return new Error('You must enable the index_sparse option to leave the slugified field empty!');
+				}
 			}
 			
 			if (options.maxLength) newSlug = newSlug.substr(0, options.maxLength);
@@ -261,31 +269,95 @@ module.exports = function(slugFields, options) {
 			return newSlug;
 		}
 
-		function validateUpdate(doc, next) {
-			var slug = doc.slugify();
-			doc.ensureUniqueSlug(newSlug, function(e, finalSlug) {
-				if (e) return next(e);
-				doc.set(options.field, finalSlug);
-				doc.markModified(options.field, finalSlug); // sometimes required :)
-				next();
+		schema.methods.saveUnique = function(callback) {
+			var doc = this;
+			return new Promise(function(resolve, reject) {
+				saveQueue.push(doc, function(error, returnedDoc) {
+					if (error) {
+						callback && callback(error);
+						return reject(error);
+					}
+					callback && callback(null, returnedDoc);
+					resolve(returnedDoc);
+				});
 			});
 		}
 
-		schema.pre('update', function(next) {
-			var doc = this;
-			validateUpdate(doc, next);
-		});
+		schema.statics.updateUnique = function(query, update, callback) {
+			var model = this;
 
-		schema.pre('findOneAndUpdate', function(next) {
-			var doc = this;
-			validateUpdate(doc, next);
-		});
+			return new Promise(function(resolve, reject) {
+				model.find(query).exec(function(error, docs) {
+					if (error) {
+						callback && callback(error);
+						return reject(error);
+					}
+
+					var savePromises = [];
+					docs.forEach(function(doc) {
+						if (update.hasOwnProperty('$set')) {
+							Object.keys(update['$set']).forEach(function(field) {
+								doc.set(field, update['$set'][field]);
+							});
+						}
+						else {
+							Object.keys(update).forEach(function(field) {
+								doc.set(field, update[field]);
+							});
+						}
+
+						savePromises.push(saveQueue.push(doc));
+					});
+
+					Promise.all(savePromises).then(function(docs) {
+						callback && callback(null, docs);
+						resolve(docs);
+					})
+					.catch(function(error) {
+						callback && callback(error);
+						reject(error);
+					})
+				});
+			});
+		}
+
+		schema.statics.findOneAndUpdateUnique = function(query, update, callback) {
+			var model = this;
+
+			return new Promise(function(resolve, reject) {
+				model.findOne(query).exec(function(error, doc) {
+					if (error) {
+						callback && callback(error);
+						return reject(error);
+					}
+					
+					if (update.hasOwnProperty('$set')) {
+						Object.keys(update['$set']).forEach(function(field) {
+							doc.set(field, update['$set'][field]);
+						});
+					}
+					else {
+						Object.keys(update).forEach(function(field) {
+							doc.set(field, update[field]);
+						});
+					}
+
+					saveQueue.push(doc, function(error, returnedDoc) {
+						if (error) {
+							callback && callback(error);
+							return reject(error);
+						}
+						callback && callback(null, returnedDoc);
+						resolve(returnedDoc);
+					});
+				});
+			});
+		}
 
 		schema.statics.findBySlug = function(slug, fields, additionalOptions, cb) {
 			var q = {};
 			q[options.field] = slug;
 			return this.findOne(q, fields, additionalOptions, cb);
 		};
-
 	});
 };
