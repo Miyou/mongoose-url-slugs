@@ -182,7 +182,7 @@ module.exports = function(slugFields, options) {
 					}
 					item.doc.markModified(options.field, finalSlug); // sometimes required :)
 					
-					item.doc.save(completeProcess);
+					item.doc.save().then(returnedDoc => completeProcess(null, returnedDoc)).catch(completeProcess);
 				});
 			}
 		}
