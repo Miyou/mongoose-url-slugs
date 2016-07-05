@@ -233,7 +233,7 @@ module.exports = function(slugFields, options) {
 		schema.methods.slugify = function() {
 			var doc = this;
 			var currentSlug = doc.get(options.field, String);
-			if (!doc.isNew && !options.update && currentSlug) return new Error('You must enable the update option to use the unique update methods!');
+			if (!doc.isNew && !options.update && currentSlug) return null;
 
 			var slugFieldsModified = doc.isNew;
 			var toSlugify = '';
@@ -250,14 +250,14 @@ module.exports = function(slugFields, options) {
 				toSlugify = doc.get(slugFields, String);
 			}
 			
-			if (!slugFieldsModified) return toSlugify;
+			if (!slugFieldsModified) return null;
 
 			var newSlug = options.generator(removeDiacritics(toSlugify), options.separator);
 
 			if (!newSlug.length) {
 				if (options.index_sparse) {
 					doc.set(options.field, undefined);
-					return newSlug;
+					return null;
 				}
 				else {
 					return new Error('You must enable the index_sparse option to leave the slugified field empty!');
