@@ -162,26 +162,25 @@ module.exports = function(slugFields, options) {
 			if (!saveQueue.tasks[slug].processing) {
 				saveQueue.tasks[slug].processing = true;
 				var item = saveQueue.tasks[slug].items.splice(0, 1)[0];
+				var completeProcess = function(error, returnedDoc) {
+					setImmediate(function() {
+						item.cb(error, returnedDoc);
+					});
+					if (saveQueue.tasks[slug].items.length > 0) {
+						saveQueue.tasks[slug].processing = false;
+						saveQueue.process(slug);
+					}
+					else {
+						delete saveQueue.tasks[slug];
+					}
+				}
+				if (!slug) return item.doc.save().then(returnedDoc => completeProcess(null, returnedDoc)).catch(completeProcess); //Just save the doc if there are no changes to be made to the slug
+				
 				item.doc.ensureUniqueSlug(slug, function(e, finalSlug) {
-					var completeProcess = function(error, returnedDoc) {
-						setImmediate(function() {
-							item.cb(error, returnedDoc);
-						});
-						if (saveQueue.tasks[slug].items.length > 0) {
-							saveQueue.tasks[slug].processing = false;
-							saveQueue.process(slug);
-						}
-						else {
-							delete saveQueue.tasks[slug];
-						}
-					}
 					if (e) return completeProcess(e)
-
-					if (slug) { //Don't set the slug if index_sparse is enabled and the field was omitted
-						item.doc.set(options.field, finalSlug);
-					}
-					item.doc.markModified(options.field, finalSlug); // sometimes required :)
 					
+					item.doc.set(options.field, finalSlug);
+					item.doc.markModified(options.field, finalSlug); // sometimes required :)
 					item.doc.save().then(returnedDoc => completeProcess(null, returnedDoc)).catch(completeProcess);
 				});
 			}
